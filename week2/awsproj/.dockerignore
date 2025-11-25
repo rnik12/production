@@ -1,0 +1,18 @@
+**/.DS_Store
+**/.idea
+**/.vscode
+
+# frontend noise
+frontend/node_modules
+frontend/.next
+frontend/out
+**/*.log
+
+# python noise
+**/__pycache__
+**/*.pyc
+**/.venv
+**/venv
+
+# memory (keep .gitkeep only)
+awsproj/backend/memory/*.json
