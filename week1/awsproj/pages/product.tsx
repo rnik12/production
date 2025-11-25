@@ -1,13 +1,18 @@
 "use client";
 
 import { useState, FormEvent } from "react";
-import { useAuth } from "@clerk/nextjs";
+import { useAuth, UserButton } from "@clerk/nextjs";
+import { Protect, PricingTable } from "@clerk/nextjs";
 import DatePicker from "react-datepicker";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { Protect, PricingTable, UserButton } from "@clerk/nextjs";
+
+type ConsultationResponse = {
+  summary?: string;
+  next_steps?: string;
+  email?: string;
+};
 
 function ConsultationForm() {
   const { getToken } = useAuth();
@@ -17,50 +22,77 @@ function ConsultationForm() {
   const [visitDate, setVisitDate] = useState<Date | null>(new Date());
   const [notes, setNotes] = useState("");
 
-  // Streaming state
+  // Output state
   const [output, setOutput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setOutput("");
+    setErrorMsg("");
     setLoading(true);
 
-    const jwt = await getToken();
-    if (!jwt) {
-      setOutput("Authentication required");
+    try {
+      const jwt = await getToken();
+      if (!jwt) {
+        setErrorMsg("Authentication required.");
+        setLoading(false);
+        return;
+      }
+
+      const res = await fetch("/api/consultation", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt}`,
+        },
+        body: JSON.stringify({
+          patient_name: patientName,
+          date_of_visit: visitDate?.toISOString().slice(0, 10),
+          notes,
+        }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        setErrorMsg(`Error ${res.status}: ${text || "Failed to generate summary."}`);
+        return;
+      }
+
+      const data: ConsultationResponse = await res.json();
+
+      // Build a clean markdown string with headings we control
+      const parts: string[] = [];
+
+      if (data.summary?.trim()) {
+        parts.push(
+          "### Summary of visit for the doctor's records\n\n" +
+            data.summary.trim()
+        );
+      }
+
+      if (data.next_steps?.trim()) {
+        parts.push(
+          "### Next steps for the doctor\n\n" +
+            data.next_steps.trim()
+        );
+      }
+
+      if (data.email?.trim()) {
+        parts.push(
+          "### Draft of email to patient in patient-friendly language\n\n" +
+            data.email.trim()
+        );
+      }
+
+      setOutput(parts.join("\n\n"));
+    } catch (err) {
+      console.error("Consultation error:", err);
+      setErrorMsg("Unexpected error while generating summary.");
+    } finally {
       setLoading(false);
-      return;
     }
-
-    const controller = new AbortController();
-    let buffer = "";
-
-    await fetchEventSource("/api/consultation", {
-      signal: controller.signal,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${jwt}`,
-      },
-      body: JSON.stringify({
-        patient_name: patientName,
-        date_of_visit: visitDate?.toISOString().slice(0, 10),
-        notes,
-      }),
-      onmessage(ev) {
-        buffer += ev.data;
-        setOutput(buffer);
-      },
-      onclose() {
-        setLoading(false);
-      },
-      onerror(err) {
-        console.error("SSE error:", err);
-        controller.abort();
-        setLoading(false);
-      },
-    });
   }
 
   return (
@@ -135,6 +167,12 @@ function ConsultationForm() {
           {loading ? "Generating Summary..." : "Generate Summary"}
         </button>
       </form>
+
+      {errorMsg && (
+        <div className="mt-4 text-sm text-red-600 dark:text-red-400">
+          {errorMsg}
+        </div>
+      )}
 
       {output && (
         <section className="mt-8 bg-gray-50 dark:bg-gray-800 rounded-xl shadow-lg p-8">

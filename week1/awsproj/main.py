@@ -1,7 +1,8 @@
 import os
+import json
 from pathlib import Path
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,7 +26,7 @@ app.add_middleware(
 )
 
 # Clerk configuration
-clerk_config = ClerkConfig(jwks_url=os.getenv("CLERK_JWKS_URL"))
+clerk_config = ClerkConfig(jwks_url=os.getenv("CLERK_JWKS_URL"), debug_mode=True)
 clerk_guard = ClerkHTTPBearer(clerk_config)
 
 
@@ -38,19 +39,33 @@ class Visit(BaseModel):
 SYSTEM_PROMPT = """
 You are provided with notes written by a doctor from a patient's visit.
 Your job is to summarize the visit for the doctor and provide an email.
-Reply with exactly three sections with the headings:
-### Summary of visit for the doctor's records
-### Next steps for the doctor
-### Draft of email to patient in patient-friendly language
+
+You MUST reply with a single valid JSON object, and nothing else.
+The JSON must have exactly these keys:
+
+- "summary": markdown string summarizing the visit for the doctor's records
+- "next_steps": markdown string listing next steps for the doctor (bullets or numbered list)
+- "email": markdown string with a draft email to the patient in patient-friendly language
+
+Example format (do NOT wrap in backticks, do NOT add extra text):
+
+{
+  "summary": "....",
+  "next_steps": "....",
+  "email": "...."
+}
 """
 
 
 def user_prompt_for(visit: Visit) -> str:
-    return f"""Create the summary, next steps and draft email for:
+    return f"""Create the summary, next steps, and draft email for this visit:
+
 Patient Name: {visit.patient_name}
 Date of Visit: {visit.date_of_visit}
+
 Notes:
-{visit.notes}"""
+{visit.notes}
+"""
 
 
 @app.post("/api/consultation")
@@ -69,27 +84,36 @@ def consultation_summary(
         {"role": "user", "content": user_prompt},
     ]
 
-    stream = client.chat.completions.create(
+    completion = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
-        stream=True,
     )
 
-    def event_stream():
-        for chunk in stream:
-            text = chunk.choices[0].delta.content
-            if not text:
-                continue
-            # Break into lines so SSE + markdown render nicely
-            lines = text.split("\n")
-            for line in lines[:-1]:
-                # SSE event line
-                yield f"data: {line}\n\n"
-                # extra break line for spacing
-                yield "data:  \n\n"
-            yield f"data: {lines[-1]}\n\n"
+    content = completion.choices[0].message.content
+    if not content:
+        raise HTTPException(status_code=500, detail="Empty response from model")
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    # Try to parse JSON from the model
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        # Fallback: if model messed up, at least return something
+        data = {
+            "summary": content,
+            "next_steps": "",
+            "email": "",
+        }
+
+    # Ensure keys exist
+    summary = data.get("summary", "")
+    next_steps = data.get("next_steps", "")
+    email = data.get("email", "")
+
+    return {
+        "summary": summary,
+        "next_steps": next_steps,
+        "email": email,
+    }
 
 
 @app.get("/health")
